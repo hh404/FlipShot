@@ -7,7 +7,9 @@
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>需要使用语音识别功能，识别"上下左右"方向指令</string>
 	<key>NSCameraUsageDescription</key>
-	<string>需要使用摄像头进行手势识别，识别"上下左右"方向手势</string>
+	<string>需要摄像头进行手势识别及 40cm 距离提示（LiDAR 测距或人脸估算）</string>
+	<key>NSMotionUsageDescription</key>
+	<string>用于 40cm 距离提示（LiDAR/设备姿态）及训练时的设备方向</string>
 	<key>UISupportedInterfaceOrientations~ipad</key>
 	<array>
 		<string>UIInterfaceOrientationLandscapeLeft</string>

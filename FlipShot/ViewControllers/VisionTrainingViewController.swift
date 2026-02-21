@@ -81,6 +81,21 @@ final class VisionTrainingViewController: UIViewController {
         l.translatesAutoresizingMaskIntoConstraints = false
         return l
     }()
+
+    /// 距离指示条：在上下左右正上方，1/4 屏宽，绿=合适/黄=远一点/橙=近一点
+    private let distanceBar: UIView = {
+        let v = UIView()
+        v.backgroundColor = .systemGray5
+        v.layer.cornerRadius = 6
+        v.translatesAutoresizingMaskIntoConstraints = false
+        return v
+    }()
+    /// 指示条 + 上下左右 同一列，不单独占一行
+    private let directionWithBarContainer: UIView = {
+        let v = UIView()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        return v
+    }()
     
     private let voiceStatusLabel: UILabel = {
         let l = UILabel()
@@ -178,6 +193,13 @@ final class VisionTrainingViewController: UIViewController {
     /// 当前训练卡 40 格 E 的方向（刷新时打乱）
     private var trainingDirections: [EDirection] = VisionCardImage.directions.shuffled()
 
+    private let distanceMonitor = DeviceDistanceMonitor()
+    /// 上次已显示的距离区间，区间未变不刷新指示条，避免闪烁
+    private var lastDistanceZone: DistanceZone?
+
+    /// 进入训练页时自动提高亮度，离开时恢复
+    private var savedBrightness: CGFloat?
+
     /// 状态机：用于推导 TrainingItemState
     private var currentTranscript: String = ""
     private var isProcessingVoice: Bool = false
@@ -202,10 +224,12 @@ final class VisionTrainingViewController: UIViewController {
         view.addSubview(refreshButton)
         view.addSubview(voiceDebugButton)
         stateBannerContainer.addSubview(stateBannerLabel)
+        directionWithBarContainer.addSubview(distanceBar)
+        directionWithBarContainer.addSubview(directionButtonsStack)
         startRowStack.addArrangedSubview(startButton)
         startRowStack.addArrangedSubview(readyIndicator)
         startRowStack.addArrangedSubview(voiceStatusLabel)
-        startRowStack.addArrangedSubview(directionButtonsStack)
+        startRowStack.addArrangedSubview(directionWithBarContainer)
         upButton = createDirectionButton(title: "上", direction: .up)
         downButton = createDirectionButton(title: "下", direction: .down)
         leftButton = createDirectionButton(title: "左", direction: .left)
@@ -230,6 +254,16 @@ final class VisionTrainingViewController: UIViewController {
         readyIndicator.heightAnchor.constraint(equalToConstant: 16).isActive = true
         directionButtonsStack.widthAnchor.constraint(equalToConstant: 280).isActive = true
         directionButtonsStack.heightAnchor.constraint(equalToConstant: 50).isActive = true
+        distanceBar.heightAnchor.constraint(equalToConstant: 14).isActive = true
+        NSLayoutConstraint.activate([
+            distanceBar.topAnchor.constraint(equalTo: directionWithBarContainer.topAnchor),
+            distanceBar.leadingAnchor.constraint(equalTo: directionWithBarContainer.leadingAnchor),
+            distanceBar.trailingAnchor.constraint(equalTo: directionWithBarContainer.trailingAnchor),
+            directionButtonsStack.topAnchor.constraint(equalTo: distanceBar.bottomAnchor, constant: 6),
+            directionButtonsStack.leadingAnchor.constraint(equalTo: directionWithBarContainer.leadingAnchor),
+            directionButtonsStack.trailingAnchor.constraint(equalTo: directionWithBarContainer.trailingAnchor),
+            directionButtonsStack.bottomAnchor.constraint(equalTo: directionWithBarContainer.bottomAnchor),
+        ])
         stateBannerLabel.topAnchor.constraint(equalTo: stateBannerContainer.topAnchor, constant: 14).isActive = true
         stateBannerLabel.leadingAnchor.constraint(equalTo: stateBannerContainer.leadingAnchor, constant: 16).isActive = true
         stateBannerLabel.trailingAnchor.constraint(equalTo: stateBannerContainer.trailingAnchor, constant: -16).isActive = true
@@ -272,8 +306,78 @@ final class VisionTrainingViewController: UIViewController {
         
         stateBannerContainer.isHidden = true
         setupVoiceRecognition()
+        setupDistanceMonitor()
     }
-    
+
+    private func setupDistanceMonitor() {
+        distanceMonitor.onUpdate = { [weak self] reading in
+            DispatchQueue.main.async {
+                self?.updateDistanceLabel(reading)
+            }
+        }
+    }
+
+    /// 先确认相机权限再启动测距，避免无权限时触发 Fig 报错；模拟器不启测距
+    private func startDistanceMonitorIfAuthorized() {
+        #if targetEnvironment(simulator)
+        updateDistanceLabel(DistanceReading(distanceCM: nil, inRange: false, method: "仅真机测距"))
+        return
+        #endif
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            distanceMonitor.start()
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+                DispatchQueue.main.async {
+                    if granted {
+                        self?.distanceMonitor.start()
+                    } else {
+                        self?.updateDistanceLabel(DistanceReading(distanceCM: nil, inRange: false, method: "需摄像头权限"))
+                    }
+                }
+            }
+        case .denied, .restricted:
+            updateDistanceLabel(DistanceReading(distanceCM: nil, inRange: false, method: "需摄像头权限"))
+        @unknown default:
+            distanceMonitor.start()
+        }
+    }
+
+    /// 仅用指示条颜色：绿=合适，黄=远一点，橙=近一点；区间未变不刷新，避免闪烁
+    private func updateDistanceLabel(_ reading: DistanceReading) {
+        let zone = reading.zone
+        guard zone != lastDistanceZone else { return }
+        lastDistanceZone = zone
+        switch zone {
+        case .unknown:
+            distanceBar.backgroundColor = .systemGray5
+        case .tooClose, .slightlyClose:
+            distanceBar.backgroundColor = .systemYellow
+        case .good:
+            distanceBar.backgroundColor = .systemGreen
+        case .slightlyFar, .tooFar:
+            distanceBar.backgroundColor = .systemOrange
+        }
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        // 自动提高屏幕亮度便于看清 E 字视标，离开时恢复
+        savedBrightness = UIScreen.main.brightness
+        UIScreen.main.brightness = 1.0
+        startDistanceMonitorIfAuthorized()
+    }
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        // 恢复进入训练页前的屏幕亮度
+        if let saved = savedBrightness {
+            UIScreen.main.brightness = saved
+            savedBrightness = nil
+        }
+        distanceMonitor.stop()
+    }
+
     private func setupVoiceRecognition() {
         let recognizer = VoiceCommandRecognizer.shared
         recognizer.onTranscript = { [weak self] text, isFinal in
